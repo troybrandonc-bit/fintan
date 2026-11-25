@@ -699,6 +699,11 @@ def make_handler(door, engine, opener=None, timeout=600):
                     body = json.loads(raw.decode("utf-8"))
                     own = body.pop("fintan", None) or {}           # the door's own options, never sent to the engine
                     body["model"], night = door.choose(body)
+                    if body.get("tools") and night is not None:
+                        # an agent's request with tools goes to the plain model: sent to a learnt update, tool
+                        # calls came back right 1 time in 10 (25 Nov); the plain model got 11 of 12
+                        body["model"], night = door.base, None
+                        door.stats["tools_to_base"] = door.stats.get("tools_to_base", 0) + 1
                     combo = (own.get("combine", True) and not body.get("stream") and not body.get("tools")
                              and door.settings().get("combine", True)
                              and combine.wanted(last_user_text(body), door.fact_index))

@@ -14,12 +14,15 @@ import json
 import os
 import urllib.request
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP as _Server       # mcp 1.x
+except ImportError:
+    from mcp.server.mcpserver import MCPServer as _Server   # mcp 2.x (FastMCP renamed)
 
 URL = os.environ.get("FINTAN_URL", "http://127.0.0.1:8900").rstrip("/")
 KEY = os.environ.get("FINTAN_API_KEY")         # when the front door has one
 KINDS = ("documents", "personal", "topics", "code", "skills", "jobs", "news")
-mcp = FastMCP("fintan")
+mcp = _Server("fintan")
 
 
 def _call(path, body=None, timeout=600):

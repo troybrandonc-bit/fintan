@@ -53,8 +53,11 @@ LOG = os.path.join(HERE, "calls.log")
 def model_fn(door):
     """gen(prompts, max_new) and confirm(prompts) through the front door (OpenAI-style), thinking off"""
     def ask(p, max_new, sample=False):
-        body = {"model": "fintan-9b", "messages": [{"role": "user", "content": p}], "max_tokens": int(max_new),
-                "temperature": 0.7 if sample else 0.0, "chat_template_kwargs": {"enable_thinking": False}}
+        # the loop's own questions to the model: the door must not treat them as chat (25 Nov: with the model's own
+        # functions on, Fintan-4B filed its decision "issue_refund 1043, 25.00" as a new job instead of returning it)
+        body = {"model": "fintan", "messages": [{"role": "user", "content": p}], "max_tokens": int(max_new),
+                "temperature": 0.7 if sample else 0.0, "chat_template_kwargs": {"enable_thinking": False},
+                "fintan": {"self_tools": False, "combine": False}}
         req = urllib.request.Request(door.rstrip("/") + "/v1/chat/completions", data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json"}, method="POST")
         r = json.loads(urllib.request.urlopen(req, timeout=600).read())
