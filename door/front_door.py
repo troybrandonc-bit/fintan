@@ -712,6 +712,12 @@ def make_handler(door, engine, opener=None, timeout=600):
                 try:
                     body = json.loads(raw.decode("utf-8"))
                     own = body.pop("fintan", None) or {}           # the door's own options, never sent to the engine
+                    # direct answers unless the app asks for thinking: the updates were learnt for direct answers, and
+                    # apps that send nothing showed the model's whole thinking text (the Docker image test, 25 Nov)
+                    kw = body.get("chat_template_kwargs")
+                    if not isinstance(kw, dict):
+                        kw = body["chat_template_kwargs"] = {}
+                    kw.setdefault("enable_thinking", False)
                     body["model"], night = door.choose(body)
                     if body.get("tools") and night is not None:
                         # an agent's request with tools goes to the plain model: sent to a learnt update, tool

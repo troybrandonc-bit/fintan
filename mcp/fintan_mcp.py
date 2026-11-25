@@ -28,7 +28,7 @@ mcp = _Server("fintan")
 def _call(path, body=None, timeout=600):
     req = urllib.request.Request(URL + path, method="POST" if body is not None else "GET",
                                  data=json.dumps(body).encode("utf-8") if body is not None else None,
-                                 headers=dict({"Content-Type": "application/json"}, **(
+                                 headers=dict({"Content-Type": "application/json", "User-Agent": "fintan-mcp/1.0"}, **(
                                      {"Authorization": "Bearer " + KEY} if KEY else {})))
     return json.loads(urllib.request.urlopen(req, timeout=timeout).read())
 

@@ -30,7 +30,8 @@ def tg(method, **params):
 
 
 def fintan(path, body=None):
-    h = {"Content-Type": "application/json"}
+    # a named client: RunPod's public address refuses Python's default one (403)
+    h = {"Content-Type": "application/json", "User-Agent": "fintan-telegram/1.0"}
     if KEY:
         h["Authorization"] = "Bearer " + KEY
     req = urllib.request.Request(URL + path, method="POST" if body is not None else "GET",
