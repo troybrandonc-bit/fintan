@@ -652,6 +652,20 @@ def make_handler(door, engine, opener=None, timeout=600):
             return False
 
         def do_GET(self):
+            if self.path.rstrip("/") == "/ping":
+                # health check for hosts (RunPod load-balanced endpoints): 200 ready, 204 the engine is still starting;
+                # no key needed and nothing about the model is shown
+                try:
+                    opener(urllib.request.Request(engine.rstrip("/") + "/v1/models"), timeout=5).read()
+                    ready = True
+                except Exception:  # noqa: BLE001
+                    ready = bool(door.sleep_engine and door.learning["running"])
+                if ready:
+                    return self._json(200, {"status": "ok"})
+                self.send_response(204)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if not self._allowed():
                 return
             if self.path.rstrip("/") == "/v1/models":

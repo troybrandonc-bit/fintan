@@ -1,0 +1,67 @@
+{
+  "title": "Fintan",
+  "description": "An open AI model that keeps learning: teach it your documents, code, topics or facts and it learns them on the GPU, without forgetting what it knew. OpenAI-compatible API with tool calling, plus teach and learn endpoints. Attach a network volume to keep what it learns.",
+  "type": "serverless",
+  "category": "language",
+  "iconUrl": "https://raw.githubusercontent.com/troybrandonc-bit/fintan/main/extensions/chrome/icon128.png",
+  "config": {
+    "runsOn": "GPU",
+    "endpointType": "LB",
+    "containerDiskInGb": 60,
+    "gpuCount": 1,
+    "gpuIds": "ADA_24,AMPERE_24,AMPERE_48,ADA_48_PRO",
+    "allowedCudaVersions": [
+      "12.8",
+      "12.9",
+      "13.0",
+      "13.1",
+      "13.2"
+    ],
+    "env": [
+      {
+        "key": "PORT",
+        "value": "8900"
+      },
+      {
+        "key": "PORT_HEALTH",
+        "value": "8900"
+      },
+      {
+        "key": "FINTAN_API_KEY",
+        "input": {
+          "name": "API key",
+          "type": "string",
+          "description": "Required. Any long random string; send it as your OpenAI API key.",
+          "default": ""
+        }
+      },
+      {
+        "key": "FINTAN_MODEL",
+        "input": {
+          "name": "Model",
+          "type": "string",
+          "description": "Fintan-9B needs a 24 GB GPU; Fintan-4B fits 16 GB.",
+          "options": [
+            {
+              "label": "Fintan-9B",
+              "value": "fintanlabs/Fintan-9B"
+            },
+            {
+              "label": "Fintan-4B",
+              "value": "fintanlabs/Fintan-4B"
+            }
+          ],
+          "default": "fintanlabs/Fintan-9B"
+        }
+      }
+    ],
+    "presets": [
+      {
+        "name": "Fintan-9B",
+        "defaults": {
+          "FINTAN_MODEL": "fintanlabs/Fintan-9B"
+        }
+      }
+    ]
+  }
+}

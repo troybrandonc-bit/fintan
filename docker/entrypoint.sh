@@ -7,7 +7,8 @@
 #                    learnt is lost when the container goes.
 set -e
 MODEL=${FINTAN_MODEL:-fintanlabs/Fintan-9B}
-DATA=${FINTAN_DATA:-$([ -d /workspace ] && echo /workspace || echo /data)}
+# RunPod serverless mounts a network volume at /runpod-volume, pods at /workspace
+DATA=${FINTAN_DATA:-$([ -d /runpod-volume ] && echo /runpod-volume || ([ -d /workspace ] && echo /workspace || echo /data))}
 APP=$DATA/fintan
 mkdir -p "$DATA"
 export HF_HOME=${HF_HOME:-$DATA/hf}
