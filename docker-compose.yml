@@ -1,0 +1,42 @@
+# Fintan + Open WebUI: a chat app whose model keeps learning, on your own NVIDIA GPU.
+#   1. put FINTAN_API_KEY=<any long random string> in a file named .env beside this one
+#   2. docker compose up -d
+#   3. open http://localhost:3000 (first start downloads the model: about 20 GB, a few minutes)
+# FINTAN_MODEL=fintanlabs/Fintan-4B in .env for a 16-20 GB card.
+services:
+  fintan:
+    image: ghcr.io/troybrandonc-bit/fintan:latest
+    environment:
+      FINTAN_MODEL: ${FINTAN_MODEL:-fintanlabs/Fintan-9B}
+      FINTAN_API_KEY: ${FINTAN_API_KEY:?put FINTAN_API_KEY=<a long random string> in .env}
+    volumes:
+      - fintan-data:/data
+    ports:
+      - "127.0.0.1:8900:8900"
+    shm_size: "8gb"
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    environment:
+      OPENAI_API_BASE_URL: http://fintan:8900/v1
+      OPENAI_API_KEY: ${FINTAN_API_KEY}
+      ENABLE_OLLAMA_API: "false"
+    volumes:
+      - open-webui:/app/backend/data
+    ports:
+      - "127.0.0.1:3000:8080"
+    depends_on:
+      - fintan
+    restart: unless-stopped
+
+volumes:
+  fintan-data:
+  open-webui:

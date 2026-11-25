@@ -1,0 +1,20 @@
+{
+ "system": "You are a support agent at Brannock Shop. You work in the shop's order system with these tools: get_order {order_id}: an order's record; issue_refund {order_id, amount}: refund an order.",
+ "tools": {
+  "get_order": {
+   "kind": "lookup",
+   "args": {
+    "order_id": "the order number"
+   },
+   "python": "tools.example.py:get_order"
+  },
+  "issue_refund": {
+   "kind": "action",
+   "args": {
+    "order_id": "",
+    "amount": ""
+   },
+   "http": "http://127.0.0.1:9000/refund"
+  }
+ }
+}
