@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>Fintan</Name>
+  <Repository>ghcr.io/troybrandonc-bit/fintan:latest</Repository>
+  <Registry>https://github.com/troybrandonc-bit/fintan/pkgs/container/fintan</Registry>
+  <Network>bridge</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/troybrandonc-bit/fintan/issues</Support>
+  <Project>https://github.com/troybrandonc-bit/fintan</Project>
+  <Overview>Fintan: an open AI model that keeps learning on your own server. Teach it your documents, a topic, your code or facts about you, and it learns them into its own weights on your NVIDIA GPU, without forgetting what it already knew. It speaks the OpenAI API on port 8900, so Open WebUI and other apps can use it. Needs the Nvidia-Driver plugin and a 24 GB card for Fintan-9B (16 GB or more for Fintan-4B). Everything it learns stays in the appdata folder.</Overview>
+  <Category>AI: Tools: Productivity:</Category>
+  <WebUI></WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/troybrandonc-bit/fintan/main/unraid/fintan.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/troybrandonc-bit/fintan/main/extensions/chrome/icon128.png</Icon>
+  <ExtraParams>--runtime=nvidia --shm-size=8g</ExtraParams>
+  <Config Name="API port" Target="8900" Default="8900" Mode="tcp" Description="Fintan's OpenAI-style API: http://[server]:8900/v1" Type="Port" Display="always" Required="true" Mask="false">8900</Config>
+  <Config Name="Data" Target="/data" Default="/mnt/user/appdata/fintan" Mode="rw" Description="The model, the base model download (about 20 GB) and everything it learns" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/fintan</Config>
+  <Config Name="API key" Target="FINTAN_API_KEY" Default="" Mode="" Description="Required. Any long random string; apps must send it as their OpenAI API key" Type="Variable" Display="always" Required="true" Mask="true"></Config>
+  <Config Name="Model" Target="FINTAN_MODEL" Default="fintanlabs/Fintan-9B|fintanlabs/Fintan-4B" Mode="" Description="Fintan-9B for 24 GB cards, Fintan-4B for 16 to 20 GB" Type="Variable" Display="always" Required="true" Mask="false">fintanlabs/Fintan-9B</Config>
+  <Config Name="GPU" Target="NVIDIA_VISIBLE_DEVICES" Default="all" Mode="" Description="Which GPU (all, or a GPU id from the Nvidia-Driver plugin)" Type="Variable" Display="advanced" Required="false" Mask="false">all</Config>
+</Container>
