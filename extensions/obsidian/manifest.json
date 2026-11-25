@@ -1,0 +1,10 @@
+{
+  "id": "teach-fintan",
+  "name": "Teach Fintan",
+  "version": "1.0.0",
+  "minAppVersion": "1.4.0",
+  "description": "Your notes, learnt into your own AI model: send a note or your whole vault to your Fintan model, which learns it on your own computer.",
+  "author": "Fintan Labs",
+  "authorUrl": "https://fintanlabs.com",
+  "isDesktopOnly": false
+}
