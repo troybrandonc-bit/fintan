@@ -63,6 +63,7 @@ from night_router4 import NightRouter4  # noqa: E402
 from skill_router import SkillRouter  # noqa: E402
 import self_tools  # noqa: E402
 import combine  # noqa: E402
+from meaning_router import MeaningRouter  # noqa: E402
 try:
     import net  # noqa: E402  (topic lookups go out through our relay only)
 except ImportError:  # the product tree keeps it in ../home
@@ -167,7 +168,9 @@ NOTE_HEAD = ("Notes the user gave (not learnt into the model). Use them if they 
 # beside the manifest) and given to the model in front of matching requests, for as long as the kind stays off.
 # Switching a kind on hands its notes to the next learning run. Switching it off does not remove what was already
 # learnt (that is `forget`).
-KINDS = ("personal", "documents", "topics", "code", "skills", "jobs", "news")
+# (26 Nov 2026) facts: checked facts (subject, relation, value) learnt as given, with no reading step; how the
+# small models learn a news week someone has already read (the 4B read 126 of 172 when it had to read them itself)
+KINDS = ("personal", "documents", "topics", "code", "skills", "jobs", "news", "facts")
 MANUAL_SOURCE = "Fintan manual"                 # the source name of the manual's items in the inbox
 SETTINGS_DEFAULT = {"auto_learn": True, "auto_when": {"waiting_at_least": 5, "hour": None},
                     "learn": {k: True for k in KINDS},
@@ -175,8 +178,23 @@ SETTINGS_DEFAULT = {"auto_learn": True, "auto_when": {"waiting_at_least": 5, "ho
                     # first. "learn" asks before every action until the person has said yes to it 5 times in a row,
                     # "always" every time, "unsure" only when unsure, "never" not at all
                     "self_tools": True, "job_approve": "learn",
-                    # combine: questions that need several learnt facts are answered in steps (combine.py)
-                    "combine": True}
+                    # combine: questions that need several learnt facts are answered in steps (combine.py).
+                    # check_answers: an update's answer that states nothing it learnt is asked again (26 Nov)
+                    "combine": True,
+                    # (27 Nov, Fintan-9B check: with the judge on, 6 right news answers were blocked and 1 gained, 149 vs 154 of
+                    # 172; off, the same 154 as the published server) off by default, on for whoever wants the check
+                    "check_answers": False,
+                    # topic_route: questions that need a learnt fact without naming it (night_router4 TOPIC_MIN_WORDS)
+                    "topic_route": False,
+                    # meaning_route: a question no word router places goes to the update whose learnt fact is closest
+                    # in meaning (meaning_router.py; needs the shipped meaning model), meaning_threshold how close
+                    # (27 Nov, Fintan-9B: unasked questions using the fact 15 -> 22 of 60, ordinary requests sent to an
+                    # update 2-4 -> 5-6 of 2000) on by default
+                    "meaning_route": True, "meaning_threshold": 0.88, "meaning_margin": 0.03,
+                    # value_check: a full-sentence answer missing the learnt value is asked for once more
+                    "value_check": True,
+                    # recall_then_act: a request with tools that needs a learnt fact gets the update's answer first
+                    "recall_then_act": True}
 
 
 class Door(object):
@@ -198,6 +216,10 @@ class Door(object):
         self.stamp, self.base, self.router, self.model_of = None, None, None, {}
         self.skills = SkillRouter()
         self.fact_index = {}
+        self.fact_values = {}
+        self.fact_text = {}
+        self.facts_of, self.meaning = [], None          # (26 Nov) routing by meaning, built on first use
+        self.tl = threading.local()                    # per request: whether it was routed by meaning
         self.net_opener = None                         # tests only: stands in for the network
         self.stats = {"requests": 0, "to_base": 0, "to_night": 0, "router_errors": 0, "reloads": 0}
         self.reload()
@@ -217,12 +239,17 @@ class Door(object):
             router = NightRouter4(background=self._read(m["background"]) if m.get("background") else [])
             skills = SkillRouter()
             model_of, paths = {}, {}
-            facts_of = []
+            facts_of, questions_of = [], {}
             for n in m.get("nights") or []:
                 fl = self._read(n["facts"]) if n.get("facts") else []
                 router.add_night(int(n["night"]), fl)
                 if not n.get("skill"):
                     facts_of.append((int(n["night"]), fl))
+                    if n.get("questions"):                     # (27 Nov) practice questions, for routing by meaning
+                        try:
+                            questions_of[int(n["night"])] = self._read(n["questions"])
+                        except Exception:  # noqa: BLE001
+                            pass
                 if n.get("skill"):
                     skills.add_night(int(n["night"]), n["skill"].get("trigger_words"))
                 model_of[int(n["night"])] = n["model"]
@@ -235,13 +262,78 @@ class Door(object):
                 self.base_model_short = (m.get("base_model") or "Qwen/Qwen3.5-9B").split("/")[-1]
                 self.skills = skills
                 self.fact_index = combine.build_index(facts_of)
+                self.fact_values = combine.build_values(facts_of)
+                self.fact_text = combine.build_fact_text(facts_of)
+                self.facts_of, self.questions_of = facts_of, questions_of
+                self.meaning_model = m.get("meaning_model") or ""
                 self.stats["reloads"] += 1
+            if self.meaning is not None:                 # new updates are embedded now, removed ones dropped
+                self._meaning_sync()
             return True
         except Exception as e:  # noqa: BLE001 - fail-open: keep what was loaded
             sys.stderr.write("front door: manifest not loaded (%s)\n" % str(e)[:200])
             if self.base is None:
                 raise
             return False
+
+    def recall(self, body, model):
+        """(27 Nov) the update's answer to the request's question of fact, from its weights, no tools; None when it has
+        no record or the answer judge finds it states nothing it learnt"""
+        q = last_user_text(body)
+
+        def post(b):
+            rq = urllib.request.Request(self.engine.rstrip("/") + "/v1/chat/completions", method="POST",
+                                        data=json.dumps(b).encode("utf-8"), headers={"Content-Type": "application/json"})
+            return json.loads(self.opener(rq, timeout=120).read())
+        try:
+            out = post({"model": model, "messages": [{"role": "user", "content": combine.RECALL_Q % q}], "max_tokens": 160,
+                        "temperature": 0, "chat_template_kwargs": {"enable_thinking": False}})
+            said = (((out.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+        except Exception:  # noqa: BLE001 - never blocks the request
+            return None
+        if not said or said.lower().startswith(("there is no record", "no record")):
+            return None
+        with self.lock:
+            idx, ftext, vals, base = self.fact_index, self.fact_text, self.fact_values, self.base
+        if self.settings().get("check_answers", False):
+            v = combine.judged_supported(said, q, idx, ftext, base, post)
+            if v is None:
+                v = combine.supported(said, q, idx, vals)
+            if v is False:
+                return None
+        return said
+
+    def meaning_router(self):
+        """the meaning router when the setting is on and its model is there, else None (built once)"""
+        if not self.settings().get("meaning_route", True):
+            return None
+        if self.meaning is None:
+            path = self.meaning_model
+            if path and not os.path.isabs(path):
+                path = os.path.join(os.path.dirname(self.path), path)
+            self.meaning = MeaningRouter(model_path=path or None)
+            bank = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ordinary_requests.json")
+            if self.meaning.ready and os.path.exists(bank):
+                # (27 Nov) the margin over ordinary requests (OpenAssistant oasst1 first messages, Apache-2.0)
+                try:
+                    with open(bank, encoding="utf-8") as f:
+                        self.meaning.set_bank(json.load(f)["requests"],
+                                              cache=os.path.join(os.path.dirname(self.path), "meaning_bank_cache.json"))
+                except Exception as e:  # noqa: BLE001
+                    sys.stderr.write("front door: ordinary requests not loaded (%s)\n" % str(e)[:120])
+            if self.meaning.error:
+                sys.stderr.write("front door: %s\n" % self.meaning.error)
+            self._meaning_sync()
+        self.meaning.threshold = float(self.settings().get("meaning_margin" if self.meaning.bank is not None
+                                                           else "meaning_threshold", 0.03 if self.meaning.bank is not None else 0.88))
+        return self.meaning if self.meaning.ready else None
+
+    def _meaning_sync(self):
+        with self.lock:
+            facts_of = list(self.facts_of)
+        for night, fl in facts_of:
+            self.meaning.add_night(night, fl, getattr(self, "questions_of", {}).get(night))
+        self.meaning.drop_missing({n for n, _f in facts_of})
 
     def choose(self, body):
         """-> (model name to send the request to, night or None). Never raises."""
@@ -251,7 +343,20 @@ class Door(object):
             with self.lock:
                 router, model_of, base, skills = self.router, self.model_of, self.base, self.skills
             text = last_user_text(body)
+            # (26 Nov) topic_route: a question that names no learnt subject but shares 3 rare words with a learnt fact
+            router.topic_rule = bool(self.settings().get("topic_route", False))
             night = router.route(text)
+            self.tl.by_meaning = False
+            if night is None:                          # (26 Nov) no learnt name in it: the closest fact in meaning
+                mr = self.meaning_router()
+                if mr is not None:
+                    night = mr.route(text)
+                    if night is not None and hasattr(router, "out_of_window") and router.out_of_window(night, text):
+                        # (27 Nov, release check: 8 of 10 questions about unlearnt days reached the update by meaning)
+                        night = None
+                    if night is not None:
+                        self.tl.by_meaning = True
+                        self.stats["by_meaning"] = self.stats.get("by_meaning", 0) + 1
             if night is None:                          # no learnt fact asked about: a learnt skill, if one fits
                 night = skills.route(text)
             if night is not None and night in model_of:
@@ -274,6 +379,19 @@ class Door(object):
             s["learn"].update({k: bool(v) for k, v in (got.get("learn") or {}).items() if k in KINDS})
             s["self_tools"] = bool(got.get("self_tools", s["self_tools"]))
             s["combine"] = bool(got.get("combine", s["combine"]))
+            s["check_answers"] = bool(got.get("check_answers", s.get("check_answers", False)))
+            s["topic_route"] = bool(got.get("topic_route", s.get("topic_route", False)))
+            s["meaning_route"] = bool(got.get("meaning_route", s.get("meaning_route", True)))
+            s["value_check"] = bool(got.get("value_check", s.get("value_check", True)))
+            try:
+                s["meaning_margin"] = float(got.get("meaning_margin", s.get("meaning_margin", 0.03)))
+            except (TypeError, ValueError):
+                pass
+            s["recall_then_act"] = bool(got.get("recall_then_act", s.get("recall_then_act", True)))
+            try:
+                s["meaning_threshold"] = float(got.get("meaning_threshold", s.get("meaning_threshold", 0.88)))
+            except (TypeError, ValueError):
+                pass
             if got.get("job_approve") in ("learn", "unsure", "never", "always"):
                 s["job_approve"] = got["job_approve"]
         except (OSError, ValueError, AttributeError):
@@ -294,6 +412,26 @@ class Door(object):
                 s["auto_when"][k] = v
         if "combine" in change:
             s["combine"] = bool(change["combine"])
+        if "check_answers" in change:
+            s["check_answers"] = bool(change["check_answers"])
+        if "topic_route" in change:
+            s["topic_route"] = bool(change["topic_route"])
+        if "meaning_route" in change:
+            s["meaning_route"] = bool(change["meaning_route"])
+        if "value_check" in change:
+            s["value_check"] = bool(change["value_check"])
+        if "recall_then_act" in change:
+            s["recall_then_act"] = bool(change["recall_then_act"])
+        if "meaning_margin" in change:
+            try:
+                s["meaning_margin"] = float(change["meaning_margin"])
+            except (TypeError, ValueError):
+                pass
+        if "meaning_threshold" in change:
+            try:
+                s["meaning_threshold"] = float(change["meaning_threshold"])
+            except (TypeError, ValueError):
+                pass
         if "self_tools" in change:
             s["self_tools"] = bool(change["self_tools"])
         if change.get("job_approve") in ("learn", "unsure", "never", "always"):
@@ -387,6 +525,8 @@ class Door(object):
         """the safety check, then the inbox (or the notes, when this kind may not be learnt).
         -> {"accepted", "reason", "flags", "waiting", "kept_as_note"}"""
         kind = kind or "personal"
+        if isinstance(text, list):                    # facts may come as a list
+            text = json.dumps(text, ensure_ascii=False)
         if kind not in KINDS:
             return {"accepted": False, "reason": "unknown kind %r (known: %s)" % (kind, ", ".join(KINDS)), "flags": [],
                     "waiting": self.waiting(), "kept_as_note": False}
@@ -413,7 +553,19 @@ class Door(object):
             self.usage.add("taught")
             return {"accepted": True, "reason": "", "flags": [], "waiting": self.waiting(), "kept_as_note": False,
                     "articles": n}
-        v = {"allow": True, "flags": []} if kind == "code" else teach_policy.check_document(text, name=source or "")
+        plain = text
+        if kind == "facts":
+            try:
+                fl = json.loads(text)
+                good = [x for x in fl if isinstance(x, dict) and all(str(x.get(k_) or "").strip() for k_ in ("subject", "relation", "value"))]
+            except (ValueError, TypeError):
+                good = []
+            if not good:
+                return {"accepted": False, "reason": "facts: give a JSON list of {subject, relation, value}", "flags": [],
+                        "waiting": self.waiting()}
+            text = json.dumps(good, ensure_ascii=False)
+            plain = " ".join("%s %s %s." % (x["subject"], x["relation"], x["value"]) for x in good)
+        v = {"allow": True, "flags": []} if kind == "code" else teach_policy.check_document(plain, name=source or "")
         self.usage.add("taught" if v["allow"] else "refused")
         if not v["allow"]:
             return {"accepted": False, "reason": v["reason"], "flags": v.get("flags") or [], "waiting": self.waiting()}
@@ -675,7 +827,8 @@ def make_handler(door, engine, opener=None, timeout=600):
             if self.path.rstrip("/") == "/fintan/status":
                 return self._json(200, {"base": door.base, "nights": door.models()[1:], "stats": door.stats,
                                         "inbox_waiting": door.waiting(), "kept_as_notes": door.kept_as_notes(),
-                                        "learning": door.learning})
+                                        "learning": door.learning,
+                                        "meaning_route": ("off" if door.meaning is None else (door.meaning.error or "on"))})
             if self.path.rstrip("/") == "/fintan/settings":
                 return self._json(200, door.settings())
             if self.path.rstrip("/") == "/fintan/jobs":
@@ -695,7 +848,8 @@ def make_handler(door, engine, opener=None, timeout=600):
                 except Exception:  # noqa: BLE001
                     return self._json(400, {"error": {"message": "the body must be JSON"}})
                 if self.path.rstrip("/") == "/fintan/teach":
-                    return self._json(200, door.teach(body.get("text"), body.get("source") or "", body.get("kind") or "personal"))
+                    return self._json(200, door.teach(body.get("text") if body.get("text") is not None else body.get("facts"),
+                                                      body.get("source") or "", body.get("kind") or ("facts" if body.get("facts") else "personal")))
                 if self.path.rstrip("/") == "/fintan/settings":
                     s = door.set_settings(body)
                     return self._json(400 if "error" in s else 200, s)
@@ -708,7 +862,7 @@ def make_handler(door, engine, opener=None, timeout=600):
                 if door.sleep_engine and door.learning["running"]:
                     return self._json(503, {"error": {"message": "Fintan is learning on this GPU; answers resume when the "
                                                                  "run ends (GET /fintan/status shows it)", "type": "learning"}})
-                selfuse = combo = False
+                selfuse = combo = rescue = False
                 try:
                     body = json.loads(raw.decode("utf-8"))
                     own = body.pop("fintan", None) or {}           # the door's own options, never sent to the engine
@@ -719,14 +873,42 @@ def make_handler(door, engine, opener=None, timeout=600):
                         kw = body["chat_template_kwargs"] = {}
                     kw.setdefault("enable_thinking", False)
                     body["model"], night = door.choose(body)
+                    if night is not None and combine.other_property(last_user_text(body), door.fact_index):
+                        # a property only other learnt subjects have: the update would mix up facts; the plain
+                        # model is asked instead (combine.other_property)
+                        body["model"], night = door.base, None
+                        door.stats["other_property_to_base"] = door.stats.get("other_property_to_base", 0) + 1
+                    if night is not None and kw.get("enable_thinking"):
+                        # (27 Nov 2026; an outside test of Fintan-9B: with thinking asked for, the update wrote its
+                        # answer straight after "<think>" and never closed it, 172 of 172 answers came back empty)
+                        # the updates were learnt for direct answers, so a request one of them answers gets one
+                        kw["enable_thinking"] = False
+                        door.stats["thinking_off_for_update"] = door.stats.get("thinking_off_for_update", 0) + 1
+                    recalled = None
                     if body.get("tools") and night is not None:
                         # an agent's request with tools goes to the plain model: sent to a learnt update, tool
-                        # calls came back right 1 time in 10 (25 Nov); the plain model got 11 of 12
+                        # calls came back right 1 time in 10 (25 Nov); the plain model got 11 of 12.
+                        # (27 Nov, the same outside test: then the learnt knowledge was missing from the tool calls,
+                        # 0 of 12) first the update answers the request's question from its weights, with no tools;
+                        # the plain model then does the tool work with that answer in front of it
+                        if own.get("recall", True) and door.settings().get("recall_then_act", True):
+                            recalled = door.recall(body, body["model"])
                         body["model"], night = door.base, None
                         door.stats["tools_to_base"] = door.stats.get("tools_to_base", 0) + 1
+                        if recalled:
+                            door.stats["recalled_for_tools"] = door.stats.get("recalled_for_tools", 0) + 1
+                            body["messages"] = [{"role": "system", "content": combine.RECALLED % recalled}] + list(body["messages"])
                     combo = (own.get("combine", True) and not body.get("stream") and not body.get("tools")
                              and door.settings().get("combine", True)
                              and combine.wanted(last_user_text(body), door.fact_index))
+                    # (25 Nov, Fintan-9B check: 11 of 60 learnt facts got "There is no record of that." because the
+                    # question named the fact differently from the update, "head office city" for "location") a
+                    # one-fact answer of no record about a learnt subject is asked again in steps, where the lookup
+                    # is told what is known about that subject; the answer still comes from the update
+                    rescue = (night is not None and not combo and own.get("combine", True) and not body.get("stream")
+                              and not body.get("tools") and door.settings().get("combine", True)
+                              and (bool(combine.subjects_in(last_user_text(body), door.fact_index))
+                                   or getattr(door.tl, "by_meaning", False)))   # (26 Nov) its answer is checked too
                     selfuse = (own.get("self_tools", True) and not body.get("stream") and not body.get("tools")
                                and door.settings().get("self_tools", True)
                                and self_tools.wanted(last_user_text(body), door.root))
@@ -786,6 +968,104 @@ def make_handler(door, engine, opener=None, timeout=600):
                 except Exception:  # noqa: BLE001
                     msg = str(e)[:300]
                 return self._json(code if isinstance(code, int) else 502, {"error": {"message": msg}})
+            if rescue:
+                data = r.read()
+                try:
+                    out = json.loads(data.decode("utf-8"))
+                    said = (((out.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+                except Exception:  # noqa: BLE001
+                    out, said = None, ""
+
+                def post_r(b):
+                    rq = urllib.request.Request(engine.rstrip("/") + "/v1/chat/completions", method="POST",
+                                                data=json.dumps(b).encode("utf-8"), headers={"Content-Type": "application/json"})
+                    return json.loads(opener(rq, timeout=timeout).read())
+
+                def no_rec(t):
+                    return t.split("</think>")[-1].strip().lower().startswith(("there is no record", "no record"))
+
+                def reply(text, kind, extra=None):
+                    return self._json(200, dict({"id": "fintan-" + kind, "object": "chat.completion", "model": base,
+                                                 "choices": [{"index": 0, "finish_reason": "stop",
+                                                              "message": {"role": "assistant", "content": text}}]},
+                                                **(extra or {})))
+                q_text = last_user_text(body)
+                with door.lock:
+                    idx, vals, model_of, base = door.fact_index, door.fact_values, dict(door.model_of), door.base
+                    ftext = door.fact_text
+                unsupported = False
+                verdict, near = None, None
+                if out is not None and said and not no_rec(said) and door.settings().get("check_answers", False):
+                    # (26 Nov, Troy: the model knows "CEO" is "chief executive officer", and translations) the plain
+                    # model judges whether the answer states a learnt fact; word matching only when it cannot be asked
+                    mr = door.meaning_router()
+                    near = mr.nearest(q_text) if mr is not None else None
+                    verdict = combine.judged_supported(said, q_text, idx, ftext, base, post_r, extra=near)
+                    if verdict is None:
+                        verdict = combine.supported(said, q_text, idx, vals)
+                if (verdict is None and out is not None and said and not no_rec(said)
+                        and door.settings().get("value_check", True) and combine.subjects_in(q_text, idx)
+                        and not combine.supported(said, q_text, idx, vals)):
+                    # (27 Nov 2026, Troy: "Those 4 that are wrong, there has to be a way that is quick to fix them")
+                    # the update's full-sentence answer does not contain what it learnt about the subject: asked once
+                    # more to state exactly that; taken only if the retry contains it, so no right answer is lost
+                    # (Fintan-9B news: 150 -> 152 of 172 by meaning, 0 broken)
+                    try:
+                        b3 = dict(body, messages=[{"role": "system", "content": combine.VALUE_AGAIN}] + list(body["messages"]))
+                        out3 = post_r(b3)
+                        said3 = (((out3.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+                        if said3 and combine.supported(said3, q_text, idx, vals):
+                            door.stats["value_retry_taken"] = door.stats.get("value_retry_taken", 0) + 1
+                            return self._json(200, out3)
+                    except Exception:  # noqa: BLE001 - the first answer stands
+                        pass
+                if verdict is False:
+                    # (26 Nov) the update's answer states nothing it learnt about the subject: asked once more, told
+                    # to say it has no record when it did not learn this
+                    unsupported = True
+                    door.stats["unsupported"] = door.stats.get("unsupported", 0) + 1
+                    try:
+                        b2 = dict(body, messages=[{"role": "system", "content": combine.NO_GUESS}] + list(body["messages"]))
+                        out2 = post_r(b2)
+                        said2 = (((out2.get("choices") or [{}])[0].get("message") or {}).get("content") or "").strip()
+                    except Exception:  # noqa: BLE001
+                        out2, said2 = None, ""
+                    ok2 = None
+                    if out2 is not None and said2 and not no_rec(said2):
+                        ok2 = combine.judged_supported(said2, q_text, idx, ftext, base, post_r, extra=near)
+                        if ok2 is None:
+                            ok2 = combine.supported(said2, q_text, idx, vals)
+                    if ok2:
+                        door.stats["unsupported_fixed"] = door.stats.get("unsupported_fixed", 0) + 1
+                        return self._json(200, out2)
+                got = None
+                if out is not None and (unsupported or no_rec(said)):
+                    try:
+                        got = combine.run(q_text, idx, model_of, base, post_r, body.get("max_tokens"))
+                    except Exception:  # noqa: BLE001 - never blocks an answer
+                        got = None
+                if got:
+                    text, lookups, short = got
+                    door.stats["rescued"] = door.stats.get("rescued", 0) + 1
+                    return reply(text, "rescued", {"fintan_lookups": [{"asked": q_, "got": g_} for q_, g_ in lookups],
+                                                   "fintan_answer": short})
+                if unsupported:
+                    # nothing learnt answers it: the plain model says so, and what is known
+                    try:
+                        text = combine.unknown_reply(q_text, idx, base, post_r, body.get("max_tokens"))
+                    except Exception:  # noqa: BLE001
+                        text = None
+                    if text:
+                        door.stats["said_unknown"] = door.stats.get("said_unknown", 0) + 1
+                        return reply(text, "unknown", {"fintan_unknown": True})
+                self.send_response(getattr(r, "status", 200))
+                self.send_header("Content-Type", r.headers.get("Content-Type") or "application/json")
+                self.send_header("X-Fintan-Night", str(night))
+                self.send_header("X-Fintan-Notes", str(len(notes)))
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             self.send_response(getattr(r, "status", 200))
             self.send_header("Content-Type", r.headers.get("Content-Type") or "application/json")
             self.send_header("X-Fintan-Night", str(night) if night is not None else "none")
